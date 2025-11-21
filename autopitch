@@ -1,0 +1,657 @@
+name: money-maker-dash-15min
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # cada 15 minutos
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: money-maker-dash
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: "pip" }
+
+      - name: Bootstrap (primera vez)
+        shell: bash
+        run: |
+          set -e
+          if [ ! -f app/main.py ]; then
+            mkdir -p .github/workflows app/templates data site
+
+            cat > requirements.txt << 'EOF'
+requests==2.32.3
+pytrends==4.9.2
+Jinja2==3.1.4
+python-slugify==8.0.4
+EOF
+
+            cat > app/main.py << 'PY'
+import os, json
+from datetime import datetime, timezone
+from app.generate_posts import generate_batch
+from app.build_site import build_site
+from app.ping_search import ping_sitemaps
+from app.metrics import update_metrics, record_run
+
+def site_url_from_repo():
+    env = os.environ.get("SITE_URL","").strip().rstrip("/")
+    if env: return env
+    repo = os.environ.get("GITHUB_REPOSITORY","")
+    if "/" in repo:
+        owner, name = repo.split("/",1)
+        if owner and name: return f"https://{owner}.github.io/{name}"
+    return ""
+
+def main():
+    url = site_url_from_repo()
+    new_count = generate_batch(max_new=12)
+    update_metrics(new_count=new_count)
+    build_site(site_url=url)
+    record_run()
+    try:
+      if url: ping_sitemaps(site_url=url)
+    except Exception as e:
+      print("Ping skipped:", e)
+
+if __name__ == "__main__":
+    main()
+PY
+
+            cat > app/generate_posts.py << 'PY'
+import os, json, random, time, urllib.parse
+from datetime import datetime
+from pathlib import Path
+from slugify import slugify
+from pytrends.request import TrendReq
+
+DEFAULT_PAYPAL = "https://paypal.me/nostrodamus777"
+DEFAULT_IBAN   = "ES15830001149095288889"
+PAYPAL = os.getenv("PAYPAL_URL", DEFAULT_PAYPAL).strip().rstrip("/")
+IBAN   = os.getenv("IBAN", DEFAULT_IBAN).strip()
+
+DATA = Path("data"); DATA.mkdir(exist_ok=True)
+POSTS = DATA / "posts.json"
+COUNTRIES = ["spain","mexico","united_states","argentina","colombia","peru","chile","brazil"]
+
+def load_posts():
+    if POSTS.exists():
+        try: return json.loads(POSTS.read_text(encoding="utf-8"))
+        except Exception: return []
+    return []
+
+def save_posts(items): POSTS.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def trending_terms(limit=80):
+    terms = []
+    try:
+        pt = TrendReq(hl="es-ES", tz=360)
+        for c in COUNTRIES:
+            try:
+                df = pt.trending_searches(pn=c)
+                terms.extend([str(t) for t in df[0].head(10).tolist()])
+                time.sleep(0.7)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if not terms:
+        terms = ["inteligencia artificial","productividad","marketing digital","emprendimiento","automatización","python","ciberseguridad","ai tools","startup ideas","side hustle"]
+    out, seen = [], set()
+    for t in terms:
+        tnorm = " ".join(t.split())
+        if tnorm.lower() not in seen:
+            seen.add(tnorm.lower()); out.append(tnorm)
+        if len(out) >= limit: break
+    return out
+
+def render_article(topic: str, lang: str):
+    if lang == "es":
+        title = f"IA aplicada: 5 prompts e ideas para {topic}"
+        bullets = [f"Qué es {topic} y por qué importa en 2025.",
+                   f"Checklist de 5 pasos para aplicar {topic} hoy sin gastar.",
+                   f"Errores comunes al empezar con {topic} y cómo evitarlos.",
+                   f"Herramientas gratuitas útiles para {topic}.",
+                   f"Métrica clave para medir el progreso en {topic}."]
+        prompts = [f"Actúa como experto en {topic}. Plan de 7 días con tareas medibles.",
+                   f"10 hooks virales para Shorts/Reels sobre {topic}.",
+                   f"AIDA de 120 palabras para vender una solución de {topic}.",
+                   f"8 KPIs para evaluar el éxito en {topic}.",
+                   f"Tutorial de 12 pasos para {topic}."]
+        excerpt = f"Ideas accionables y 5 prompts sobre {topic} para usar hoy."
+    else:
+        title = f"Applied AI: 5 prompts and ideas for {topic}"
+        bullets = [f"What is {topic} and why it matters in 2025.",
+                   f"5-step checklist to apply {topic} today for free.",
+                   f"Common mistakes with {topic} and how to avoid them.",
+                   f"Free useful tools for {topic}.",
+                   f"Key metric to track progress in {topic}."]
+        prompts = [f"Act as an expert in {topic}. 7-day plan with measurable tasks.",
+                   f"10 viral hooks for Shorts/Reels about {topic}.",
+                   f"120-word AIDA to sell a {topic} solution.",
+                   f"8 KPIs to evaluate success in {topic}.",
+                   f"12-step tutorial for {topic}."]
+        excerpt = f"Actionable ideas and 5 prompts about {topic}."
+    hero = f"https://source.unsplash.com/1200x630/?{urllib.parse.quote_plus(topic)}"
+    body = f"""
+<p>{'Aplicaciones' if lang=='es' else 'Practical applications'} de <strong>{topic}</strong> {'para usar hoy sin gastar.' if lang=='es' else 'you can use today for free.'}</p>
+<h2>{'Ideas clave' if lang=='es' else 'Key ideas'}</h2>
+<ul>{"".join([f"<li>{b}</li>" for b in bullets])}</ul>
+<h2>{'Prompts listos para copiar' if lang=='es' else 'Prompts ready to copy'}</h2>
+<ol>{"".join([f"<li><code>{p}</code></li>" for p in prompts])}</ol>
+<hr><h3>{'Apoya este proyecto' if lang=='es' else 'Support this project'}</h3>
+<ul>
+{"<li>PayPal: <a href='"+PAYPAL+"' target='_blank' rel='noopener'>"+PAYPAL+"</a> · <a href='"+PAYPAL+"/1' target='_blank'>+1€</a> · <a href='"+PAYPAL+"/3' target='_blank'>+3€</a> · <a href='"+PAYPAL+"/5' target='_blank'>+5€</a> · <a href='"+PAYPAL+"/10' target='_blank'>+10€</a></li>" if PAYPAL else ""}
+{"<li>IBAN: "+IBAN+" (SEPA)</li>" if IBAN else ""}
+</ul>
+<p style='font-size:12px;color:#666'>Unsplash image. Auto-updates every 15 min.</p>
+"""
+    return title, excerpt, hero, body
+
+def generate_batch(max_new=12):
+    posts = load_posts()
+    existing = {p["slug"] for p in posts}
+    topics = trending_terms(limit=100)
+    random.shuffle(topics)
+    created = 0
+    for topic in topics:
+        for lang in ["es","en"]:
+            title, excerpt, hero, body = render_article(topic, lang)
+            slug = slugify(f"{lang}-{title}")[:90]
+            if slug in existing: continue
+            posts.append({
+                "title": title, "slug": slug, "lang": lang,
+                "date": datetime.utcnow().isoformat(timespec="seconds")+"Z",
+                "topic": topic, "excerpt": excerpt,
+                "hero": hero, "body": body,
+                "paypal": PAYPAL, "iban": IBAN
+            })
+            existing.add(slug); created += 1
+            if created >= max_new: break
+        if created >= max_new: break
+    posts.sort(key=lambda x: x["date"], reverse=True)
+    save_posts(posts)
+    print(f"Generated {created} new posts; total={len(posts)}")
+    return created
+PY
+
+            cat > app/metrics.py << 'PY'
+import json
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+
+DATA = Path("data"); DATA.mkdir(exist_ok=True)
+POSTS = DATA / "posts.json"
+METR = DATA / "metrics.json"
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00","Z")
+
+def update_metrics(new_count: int = 0):
+    posts = json.loads(POSTS.read_text(encoding="utf-8")) if POSTS.exists() else []
+    m = json.loads(METR.read_text(encoding="utf-8")) if METR.exists() else {}
+    now = datetime.now(timezone.utc)
+
+    total = len(posts)
+    last24 = 0; last7 = 0; es = 0; en = 0
+    for p in posts:
+        try:
+            dt = datetime.fromisoformat(p["date"].replace("Z","+00:00"))
+            if (now - dt) <= timedelta(hours=24): last24 += 1
+            if (now - dt) <= timedelta(days=7): last7 += 1
+        except Exception:
+            pass
+        if p.get("lang")=="es": es += 1
+        if p.get("lang")=="en": en += 1
+
+    topics = []
+    for p in posts[:20]:
+        t = p.get("topic","").strip()
+        if t and t not in topics: topics.append(t)
+
+    pings = m.get("pings", 0)
+
+    m.update({
+        "updated_at": _now_iso(),
+        "total_posts": total,
+        "new_last_run": new_count,
+        "last_24h": last24,
+        "last_7d": last7,
+        "lang_es": es,
+        "lang_en": en,
+        "recent_topics": topics,
+        "pings": pings
+    })
+    METR.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def record_run():
+    m = json.loads(METR.read_text(encoding="utf-8")) if METR.exists() else {}
+    runs = m.get("runs", [])
+    runs.insert(0, _now_iso())
+    m["runs"] = runs[:50]
+    METR.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def bump_pings():
+    m = json.loads(METR.read_text(encoding="utf-8")) if METR.exists() else {}
+    m["pings"] = int(m.get("pings", 0)) + 1
+    METR.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+PY
+
+            cat > app/build_site.py << 'PY'
+import json, os, re, urllib.parse, secrets
+from pathlib import Path
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from html import escape as esc
+
+ROOT=Path("."); SITE=ROOT/"site"; TPL=ROOT/"app"/"templates"; DATA=ROOT/"data"/"posts.json"; METR=ROOT/"data"/"metrics.json"; INX=ROOT/"data"/"indexnow_key.txt"
+
+STR = {
+  "es":{"title":"Money Maker – IA aplicada","rss":"RSS","sitemap":"Sitemap","search":"Buscar","support":"Apoya el proyecto","donate":"Donar","copy":"Copiar IBAN","copied":"IBAN copiado","read":"Leer →","auto":"Actualiza cada 15 minutos.","also":"También te puede interesar","back":"← Volver","lang":"English"},
+  "en":{"title":"Money Maker – Applied AI","rss":"RSS","sitemap":"Sitemap","search":"Search","support":"Support this project","donate":"Donate","copy":"Copy IBAN","copied":"IBAN copied","read":"Read →","auto":"Updates every 15 minutes.","also":"You may also like","back":"← Back","lang":"Español"}
+}
+
+def _toks(s): return set(re.findall(r"[a-z0-9]+",(s or "").lower()))
+
+def _epc_qr(iban: str, name: str, amount: str, rem: str):
+    lines = ["BCD","001","1","SCT","",""+name[:70],iban.replace(" ",""),f"EUR{amount}","",""+rem[:70]]
+    payload = "\n".join(lines)
+    return "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" + urllib.parse.quote(payload)
+
+def build_site(site_url: str):
+    SITE.mkdir(exist_ok=True, parents=True)
+    env=Environment(loader=FileSystemLoader(str(TPL)), autoescape=select_autoescape())
+    posts=json.loads(Path(DATA).read_text(encoding="utf-8")) if Path(DATA).exists() else []
+    metr=json.loads(Path(METR).read_text(encoding="utf-8")) if Path(METR).exists() else {}
+
+    paypal=os.getenv("PAYPAL_URL","https://paypal.me/nostrodamus777").strip().rstrip("/")
+    iban=os.getenv("IBAN","ES15830001149095288889").strip()
+    iban_name=os.getenv("IBAN_NAME","AUTOPILOT").strip()
+    qr_pp = ("https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=" + urllib.parse.quote(paypal)) if paypal else ""
+    epc_3 = _epc_qr(iban, iban_name, "3.00", "Apoyo proyecto")
+    epc_5 = _epc_qr(iban, iban_name, "5.00", "Apoyo proyecto")
+    epc_10= _epc_qr(iban, iban_name, "10.00", "Apoyo proyecto")
+
+    es=[p for p in posts if p.get("lang")=="es"]; en=[p for p in posts if p.get("lang")=="en"]
+
+    def related_map(items):
+        toks=[(_toks(p["title"])|_toks(p["topic"])) for p in items]; rel={}
+        for i,_ in enumerate(items):
+            sims=[]
+            for j,_ in enumerate(items):
+                if i==j: continue
+                inter=len(toks[i]&toks[j]); uni=len(toks[i]|toks[j]) or 1
+                sims.append((inter/uni,j))
+            sims.sort(reverse=True); rel[items[i]["slug"]] = [items[k]["slug"] for _,k in sims[:3]]
+        return rel
+    rel_es, rel_en = related_map(es), related_map(en)
+
+    key=None
+    if INX.exists():
+        try: key=INX.read_text().strip()
+        except Exception: key=None
+    if not key:
+        key=secrets.token_hex(16)
+        INX.write_text(key, encoding="utf-8")
+    (SITE/f"indexnow-{key}.txt").write_text(key, encoding="utf-8")
+
+    idx_tpl=env.get_template("index.html"); post_tpl=env.get_template("post.html"); search_tpl=env.get_template("search.html"); dash_tpl=env.get_template("dashboard.html")
+
+    def write_lang(lang, items, rel):
+        base = SITE if lang=="es" else (SITE/"en")
+        base.mkdir(exist_ok=True, parents=True)
+        (base/"index.html").write_text(idx_tpl.render(
+          posts=items, site_url=site_url + ("" if lang=="es" else "/en"),
+          t=STR[lang], paypal=paypal, iban=iban, qr_pp=qr_pp,
+          lang=lang, other=site_url + ("/en" if lang=="es" else "")
+        ), encoding="utf-8")
+        pdir=base/"posts"; pdir.mkdir(exist_ok=True)
+        for p in items:
+            (pdir/f"{p['slug']}.html").write_text(post_tpl.render(
+              p=p, site_url=site_url + ("" if lang=="es" else "/en"),
+              t=STR[lang], paypal=paypal, iban=iban, qr_pp=qr_pp, epc3=epc_3, epc5=epc_5, epc10=epc_10,
+              rel=rel.get(p["slug"], []), lang=lang, other=site_url + ("/en" if lang=="es" else "")
+            ), encoding="utf-8")
+        idx=[{"title":p["title"],"url":f"{site_url}{'' if lang=='es' else '/en'}/posts/{p['slug']}.html","excerpt":p["excerpt"],"topic":p["topic"],"slug":p["slug"]} for p in items]
+        (base/"search.json").write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+        (base/"search.html").write_text(search_tpl.render(site_url=site_url + ("" if lang=="es" else "/en"), t=STR[lang], lang=lang, other=site_url + ("/en" if lang=="es" else "")), encoding="utf-8")
+
+    write_lang("es", es, rel_es)
+    write_lang("en", en, rel_en)
+
+    (SITE/"dashboard.html").write_text(dash_tpl.render(site_url=site_url, m=metr), encoding="utf-8")
+
+    sm=["<?xml version='1.0' encoding='UTF-8'?>","<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'>"]
+    if site_url:
+        sm += [f"<url><loc>{site_url}/</loc></url>", f"<url><loc>{site_url}/en/</loc></url>", f"<url><loc>{site_url}/dashboard.html</loc></url>"]
+        for p in es: sm.append(f"<url><loc>{site_url}/posts/{p['slug']}.html</loc></url>")
+        for p in en: sm.append(f"<url><loc>{site_url}/en/posts/{p['slug']}.html</loc></url>")
+        sm.append(f"<url><loc>{site_url}/indexnow-{key}.txt</loc></url>")
+    sm.append("</urlset>"); (SITE/"sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
+
+    from datetime import datetime, timedelta, timezone
+    now=datetime.now(timezone.utc)
+    recent=[p for p in (es+en) if (now - datetime.fromisoformat(p["date"].replace("Z","+00:00"))) <= timedelta(hours=48)]
+    ns=["<?xml version='1.0' encoding='UTF-8'?>","<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9' xmlns:news='http://www.google.com/schemas/sitemap-news/0.9'>"]
+    for p in recent:
+        loc = f"{site_url}{'' if p['lang']=='es' else '/en'}/posts/{p['slug']}.html"
+        ns += ["<url>", f"<loc>{loc}</loc>", "<news:news>",
+               "<news:publication><news:name>Money Maker</news:name><news:language>"+("es" if p["lang"]=="es" else "en")+"</news:language></news:publication>",
+               f"<news:publication_date>{p['date']}</news:publication_date>",
+               f"<news:title>{esc(p['title'])}</news:title>", "</news:news>", "</url>"]
+    ns.append("</urlset>"); (SITE/"news-sitemap.xml").write_text("\n".join(ns), encoding="utf-8")
+
+    ims=["<?xml version='1.0' encoding='UTF-8'?>","<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9' xmlns:image='http://www.google.com/schemas/sitemap-image/1.1'>"]
+    for p in (es+en):
+        loc = f"{site_url}{'' if p['lang']=='es' else '/en'}/posts/{p['slug']}.html"
+        ims += ["<url>", f"<loc>{loc}</loc>", f"<image:image><image:loc>{p['hero']}</image:loc><image:title>{esc(p['title'])}</image:title></image:image>", "</url>"]
+    ims.append("</urlset>"); (SITE/"image-sitemap.xml").write_text("\n".join(ims), encoding="utf-8")
+
+    robots="User-agent: *\nAllow: /\n"
+    if site_url:
+        robots+=f"Sitemap: {site_url}/sitemap.xml\nSitemap: {site_url}/news-sitemap.xml\nSitemap: {site_url}/image-sitemap.xml\n"
+    (SITE/"robots.txt").write_text(robots, encoding="utf-8")
+
+    rss=["<?xml version='1.0' encoding='UTF-8'?>","<rss version='2.0'><channel>","<title>Money Maker – Feed</title>",f"<link>{esc(site_url)}</link>","<description>Hourly prompts and ideas (ES/EN).</description>"]
+    for p in (es+en)[:60]:
+        loc = f"{site_url}{'' if p['lang']=='es' else '/en'}/posts/{p['slug']}.html"
+        rss += ["<item>", f"<title>{esc(p['title'])}</title>", f"<link>{esc(loc)}</link>", f"<guid>{esc(loc)}</guid>", f"<description>{esc(p['excerpt'])}</description>", "</item>"]
+    rss.append("</channel></rss>"); (SITE/"feed.xml").write_text("\n".join(rss), encoding="utf-8")
+
+    (SITE/"manifest.webmanifest").write_text(json.dumps({"name":"Money Maker","short_name":"Money","start_url":"/","display":"standalone","background_color":"#ffffff","theme_color":"#0a66c2","icons":[{"src":"/favicon.svg","sizes":"any","type":"image/svg+xml"}]}, indent=2), encoding="utf-8")
+    (SITE/"sw.js").write_text("self.addEventListener('install',e=>{e.waitUntil(caches.open('v1').then(c=>c.addAll(['./','./index.html','./feed.xml','./sitemap.xml','./news-sitemap.xml','./image-sitemap.xml','./dashboard.html'])))});self.addEventListener('fetch',e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request)))})", encoding="utf-8")
+    (SITE/"favicon.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="8" fill="#0a66c2"/><text x="50%" y="54%" text-anchor="middle" font-size="34" font-family="Arial" fill="#fff">AI</text></svg>', encoding="utf-8")
+    print("Site built")
+PY
+
+            cat > app/ping_search.py << 'PY'
+import requests
+from app.metrics import bump_pings
+
+def ping_sitemaps(site_url: str):
+    sm = f"{site_url}/sitemap.xml"
+    targets = [
+        f"https://www.google.com/ping?sitemap={sm}",
+        f"https://www.bing.com/webmaster/ping.aspx?siteMap={sm}",
+        "https://ping.feedburner.google.com/?url=" + f"{site_url}/feed.xml",
+        "https://pingomatic.com/ping/?title=Money+Maker&rssurl=" + f"{site_url}/feed.xml"
+    ]
+    for t in targets:
+        try:
+            r = requests.get(t, timeout=12); print("Ping:", t, r.status_code)
+            bump_pings()
+        except Exception as e:
+            print("Ping error:", t, e)
+PY
+
+            cat > app/templates/index.html << 'HTML'
+<!doctype html>
+<html lang="{{ 'es' if lang=='es' else 'en' }}">
+<head>
+  <meta charset="utf-8">
+  <title>{{ t.title }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{{ t.title }} · {{ t.auto }}">
+  <link rel="alternate" type="application/rss+xml" href="{{ site_url }}/feed.xml" />
+  <link rel="manifest" href="{{ site_url }}/manifest.webmanifest">
+  <link rel="icon" href="{{ site_url }}/favicon.svg">
+  <style>
+    :root{--c:#0a66c2}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:960px;margin:0 auto;padding:24px;line-height:1.6}
+    a{color:var(--c);text-decoration:none}
+    .top{position:sticky;top:0;background:#fff;border-bottom:1px solid #eee;padding:8px 0;z-index:10;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .post{display:flex;gap:16px;margin:18px 0;padding-bottom:18px;border-bottom:1px solid #eee}
+    .thumb{width:220px;height:124px;background:#f4f4f4;object-fit:cover;border-radius:8px}
+    .small{font-size:12px;color:#666}
+    .cta{background:#f8fbff;padding:12px;border:1px solid #e6f0ff;border-radius:8px;margin:16px 0}
+    .btn{background:var(--c);color:#fff;padding:6px 10px;border-radius:6px;display:inline-block}
+    .ghost{background:#fff;border:1px solid var(--c);color:var(--c)}
+    @media (max-width:700px){.post{flex-direction:column}.thumb{width:100%;height:auto}}
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div><strong>{{ t.title }}</strong></div>
+    <div class="small"><a href="{{ site_url }}/feed.xml">{{ t.rss }}</a> · <a href="{{ site_url }}/sitemap.xml">{{ t.sitemap }}</a> · <a href="{{ site_url }}/dashboard.html">Dashboard</a> · <a href="{{ other }}">{{ t.lang }}</a></div>
+  </div>
+
+  <div class="cta">
+    <strong>{{ t.support }}</strong><br>
+    {% if paypal %}
+      <a class="btn" href="{{ paypal }}" target="_blank" rel="noopener">{{ t.donate }}</a>
+      <a class="ghost btn" href="{{ paypal }}/1" target="_blank">€1</a>
+      <a class="ghost btn" href="{{ paypal }}/3" target="_blank">€3</a>
+      <a class="ghost btn" href="{{ paypal }}/5" target="_blank">€5</a>
+      <a class="ghost btn" href="{{ paypal }}/10" target="_blank">€10</a>
+      {% if qr_pp %}<div class="small" style="margin-top:8px"><img src="{{ qr_pp }}" width="160" height="160" alt="QR PayPal"></div>{% endif %}
+    {% endif %}
+    <div class="small" style="margin-top:6px">IBAN: <span id="iban">{{ iban }}</span> · <a href="#" onclick="copyIBAN();return false;">Copiar</a></div>
+  </div>
+
+  {% for p in posts %}
+  <article class="post">
+    <a href="{{ site_url }}/posts/{{ p.slug }}.html"><img class="thumb" src="{{ p.hero }}" alt="{{ p.title }}"></a>
+    <div>
+      <h2 style="margin:6px 0;"><a href="{{ site_url }}/posts/{{ p.slug }}.html">{{ p.title }}</a></h2>
+      <div class="small">{{ p.date }}</div>
+      <p>{{ p.excerpt }}</p>
+      <a href="{{ site_url }}/posts/{{ p.slug }}.html">{{ t.read }}</a>
+    </div>
+  </article>
+  {% endfor %}
+
+  <p class="small">{{ t.auto }}</p>
+  <script>
+    function copyIBAN(){const el=document.getElementById('iban'); if(!el) return; navigator.clipboard.writeText(el.textContent.trim()).then(()=>alert('{{ t.copied }}'));}
+  </script>
+</body>
+</html>
+HTML
+
+            cat > app/templates/post.html << 'HTML'
+<!doctype html>
+<html lang="{{ 'es' if p.lang=='es' else 'en' }}">
+<head>
+  <meta charset="utf-8">
+  <title>{{ p.title }} – Money Maker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{{ p.excerpt }}">
+  <meta property="og:title" content="{{ p.title }}"><meta property="og:description" content="{{ p.excerpt }}"><meta property="og:image" content="{{ p.hero }}"><meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="{{ site_url }}/favicon.svg">
+  <style>
+    :root{--c:#0a66c2}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:780px;margin:0 auto;padding:24px;line-height:1.75}
+    a{color:var(--c)} .hero{width:100%;height:auto;border-radius:8px}
+    .meta{font-size:12px;color:#666;margin-bottom:12px}
+    .cta{background:#f8fbff;padding:12px;border:1px solid #e6f0ff;border-radius:8px;margin:16px 0}
+    .btn{background:var(--c);color:#fff;padding:6px 10px;border-radius:6px;display:inline-block}
+    .ghost{background:#fff;border:1px solid var(--c);color:var(--c)}
+    .share a{margin-right:10px}
+    .qrwrap{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  </style>
+</head>
+<body>
+  <p class="meta">{{ p.date }}</p>
+  <h1>{{ p.title }}</h1>
+  <img class="hero" src="{{ p.hero }}" alt="{{ p.title }}">
+  <div>{{ p.body | safe }}</div>
+
+  <div class="cta">
+    <strong>{{ t.support }}</strong><br>
+    {% if paypal %}
+      <a class="btn" href="{{ paypal }}" target="_blank" rel="noopener">{{ t.donate }}</a>
+      <a class="ghost btn" href="{{ paypal }}/1" target="_blank">€1</a>
+      <a class="ghost btn" href="{{ paypal }}/3" target="_blank">€3</a>
+      <a class="ghost btn" href="{{ paypal }}/5" target="_blank">€5</a>
+      <a class="ghost btn" href="{{ paypal }}/10" target="_blank">€10</a>
+    {% endif %}
+    <div class="qrwrap" style="margin-top:8px">
+      {% if qr_pp %}<div><div class="small">QR PayPal</div><img src="{{ qr_pp }}" width="120" height="120" alt="QR PayPal"></div>{% endif %}
+      <div><div class="small">EPC/SEPA €3</div><img src="{{ epc3 }}" width="120" height="120" alt="EPC 3€"></div>
+      <div><div class="small">EPC/SEPA €5</div><img src="{{ epc5 }}" width="120" height="120" alt="EPC 5€"></div>
+      <div><div class="small">EPC/SEPA €10</div><img src="{{ epc10 }}" width="120" height="120" alt="EPC 10€"></div>
+    </div>
+    <div class="small" style="margin-top:6px">IBAN: <span id="iban">{{ p.iban }}</span> · <a href="#" onclick="copyIBAN();return false;">{{ t.copy }}</a></div>
+  </div>
+
+  {% if rel %}
+  <div class="cta"><strong>{{ t.also }}:</strong><ul>{% for s in rel %}<li><a href="{{ site_url }}/posts/{{ s }}.html">{{ s.replace('-', ' ').title() }}</a></li>{% endfor %}</ul></div>
+  {% endif %}
+
+  <div class="share">Telegram · WhatsApp · X — comparte el enlace de arriba</div>
+  <p><a href="{{ site_url }}">{{ t.back }}</a></p>
+
+  <script>
+    function copyIBAN(){const el=document.getElementById('iban'); if(!el) return; navigator.clipboard.writeText(el.textContent.trim()).then(()=>alert('{{ t.copied }}'))}
+  </script>
+</body>
+</html>
+HTML
+
+            cat > app/templates/search.html << 'HTML'
+<!doctype html>
+<html lang="{{ 'es' if lang=='es' else 'en' }}">
+<head>
+  <meta charset="utf-8">
+  <title>{{ t.search }} – Money Maker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:860px;margin:0 auto;padding:24px;line-height:1.6}
+    input{width:100%;padding:12px;border:1px solid #ddd;border-radius:8px}
+    .r{margin-top:16px}
+    .r a{color:#0a66c2;text-decoration:none;font-weight:600}
+    .small{font-size:12px;color:#666}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script>
+</head>
+<body>
+  <h1>{{ t.search }}</h1>
+  <input id="q" type="search" placeholder="{{ t.search }}...">
+  <div id="out"></div>
+  <p class="small"><a href="{{ site_url }}">{{ t.back }}</a></p>
+  <script>
+    let idx,data=[];
+    fetch('{{ site_url }}/search.json').then(r=>r.json()).then(j=>{data=j; idx=lunr(function(){this.ref('slug'); this.field('title'); this.field('excerpt'); this.field('topic'); j.forEach(d=>this.add(d))});});
+    const q=document.getElementById('q'), out=document.getElementById('out');
+    q.addEventListener('input',()=>{ if(!idx){return;} const res=q.value.trim()? idx.search(q.value.trim()):[];
+      out.innerHTML = res.map(r=>{const d=data.find(x=>x.slug===r.ref); return `<div class="r"><a href="${d.url}">${d.title}</a><div class="small">${d.excerpt}</div></div>`;}).join('') || '<p class="small">Sin resultados / No results</p>';});
+  </script>
+</body>
+</html>
+HTML
+
+            cat > app/templates/dashboard.html << 'HTML'
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard – Money Maker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root{--c:#0a66c2}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:980px;margin:0 auto;padding:24px;line-height:1.6}
+    h1{margin:0 0 6px 0}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+    .card{border:1px solid #eee;border-radius:10px;padding:12px;background:#fff}
+    .n{font-size:28px;font-weight:700;color:#111}
+    .small{font-size:12px;color:#666}
+    @media(max-width:840px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:520px){.grid{grid-template-columns:1fr}}
+    ul{margin:0;padding-left:18px}
+    a{color:#0a66c2;text-decoration:none}
+  </style>
+</head>
+<body>
+  <h1>Dashboard</h1>
+  <p class="small"><a href="{{ site_url }}">← Ir al sitio</a></p>
+  <div class="grid">
+    <div class="card"><div>Total posts</div><div class="n">{{ m.get('total_posts',0) }}</div></div>
+    <div class="card"><div>Nuevos (última ejecución)</div><div class="n">{{ m.get('new_last_run',0) }}</div></div>
+    <div class="card"><div>Últimas 24h</div><div class="n">{{ m.get('last_24h',0) }}</div></div>
+    <div class="card"><div>Últimos 7 días</div><div class="n">{{ m.get('last_7d',0) }}</div></div>
+    <div class="card"><div>ES</div><div class="n">{{ m.get('lang_es',0) }}</div></div>
+    <div class="card"><div>EN</div><div class="n">{{ m.get('lang_en',0) }}</div></div>
+    <div class="card"><div>Pings enviados</div><div class="n">{{ m.get('pings',0) }}</div></div>
+    <div class="card"><div>Última actualización</div><div class="n" style="font-size:18px">{{ m.get('updated_at','—') }}</div></div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <strong>Temas recientes</strong>
+    <ul>
+      {% for t in m.get('recent_topics', []) %}
+      <li>{{ t }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <strong>Ejecuciones (últimas)</strong>
+    <ul>
+    {% for r in m.get('runs', [])[:10] %}
+      <li>{{ r }}</li>
+    {% endfor %}
+    </ul>
+  </div>
+</body>
+</html>
+HTML
+
+            cat > README.md << 'EOF'
+Money Maker – Dash 15min (0€): publica ES/EN cada 15 min, SEO (sitemaps news/image, RSS), PWA, búsqueda y CTAs de cobro (PayPal importes, IBAN, QR PayPal y EPC/SEPA). Panel en /dashboard.html con KPIs.
+Secrets (opcional, modifica sin tocar código): PAYPAL_URL, IBAN, IBAN_NAME, SITE_URL.
+EOF
+
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add -A
+            git commit -m "bootstrap money-maker dash"
+            git push || true
+          fi
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generar contenido, métricas y sitio
+        env:
+          PAYPAL_URL: ${{ secrets.PAYPAL_URL }}
+          IBAN: ${{ secrets.IBAN }}
+          IBAN_NAME: ${{ secrets.IBAN_NAME }}
+          SITE_URL: ${{ secrets.SITE_URL }}
+        run: |
+          python app/main.py
+
+      - name: Persistir datos
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/posts.json data/metrics.json data/indexnow_key.txt || true
+          git commit -m "update data [skip ci]" || true
+          git push || true
+
+      - name: Configurar Pages
+        uses: actions/configure-pages@v5
+
+      - name: Subir artefacto
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
+
+      - name: Publicar en Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Done
+        run: echo "Deployed to ${{ steps.deployment.outputs.page_url }}"
